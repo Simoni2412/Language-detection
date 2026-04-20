@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Optional, Tuple
 from lingua import Language, LanguageDetectorBuilder
 from sympy.codegen.ast import none
-from transformers import pipeline as hf_pipeline
+from googletrans import Translator
 from collections import defaultdict
 from collections import Counter
 
@@ -22,17 +22,16 @@ from docx import Document
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
 ZH_PREFIXES = ("zh", "ja", "ko")
 IGNORE_TERMS = {"unk", "n/a", "na", "ni", "yes", "no", "fr", "comment", "comments", "sender",
                 "test", "result", "value", "qualifier", "date", "name", "type", "code",
                 "status", "number", "source", "report", "case", "drug", "dose", "route", "senders",
                 "given", "value/qualifier", "duplicate", "textual", "medra", "unit", "paclitaxel arrow",
-                "exfumador", "transminases", "afssaps", "fr-afssaps-"
+                "exfumador", "transminases", "afssaps", "fr-afssaps-", "france",
                 }
 COMMON_MEDICAL_TERMS = {
     "lipase", "glucose", "albumin", "protein", "plasma",
-    "insulin", "cholesterol", "bilirubin", "carcinoma"
+    "insulin", "cholesterol", "bilirubin", "carcinoma", "paxlovid", "pembrolizumab", "patient",
 }
 # Common English words that look French/Italian to fastText
 # (pharma regulatory domain cognates + British spellings)
@@ -41,7 +40,7 @@ _ENGLISH_COGNATES = {
     "identification", "information", "relevant", "dosage", "version",
     "country", "number", "batch", "wrapper", "and", "for", "of",
     "the", "with", "meddra", "icsr", "ich", " hospitalisation", "available", "congenital",
-    "anomaly", "birth", "defect"
+    "anomaly", "birth", "defect", "organisation", "therapies"
 }
 
 def _all_words_english(text: str) -> bool:
@@ -288,9 +287,7 @@ _DOSAGE_RE = re.compile(
     re.IGNORECASE
 )
 
-_STRUCTURED_ID_RE = re.compile(
-    r'^(?=.*\d)(?=.*[-_])[A-Za-z0-9\-_]+$'
-)
+_STRUCTURED_ID_RE = re.compile(r'^[A-Z]{2,3}\s*/\s*\d+(?:\s*/\s*\d+)+$', re.IGNORECASE)
 
 # All-caps section headers like "PATIENT DEATH", "RELEVANT PAST DRUG HISTORY"
 # Excludes strings with parentheses — those may be substance descriptions
@@ -340,7 +337,7 @@ def prepare_for_detection(text: str) -> Optional[str]:
     Full pre-processing pipeline before language detection.
     Returns None if the text should be skipped entirely.
     """
-    text = normalize_for_detection(text)
+    # text = normalize_for_detection(text)
 
     if not text or text.lower().strip() in IGNORE_TERMS:
         #print(f"  KILLED by IGNORE_TERMS: '{text}'")
@@ -356,7 +353,7 @@ def prepare_for_detection(text: str) -> Optional[str]:
         # print(f"  KILLED by ORG_NAME_RE: '{text}'")
         return None
     if _STRUCTURED_ID_RE.match(stripped):
-        # print(f"  KILLED by STRUCTURED_ID_RE: '{text}'")
+        print(f"  KILLED by STRUCTURED_ID_RE: '{text}'")
         return None
     if _ALL_CAPS_HEADER_RE.match(stripped) and '(' not in stripped:
         # print(f"  KILLED by ALL_CAPS_HEADER_RE: '{text}'")
@@ -370,7 +367,7 @@ def prepare_for_detection(text: str) -> Optional[str]:
         print(f"  KILLED by length: '{text}'")
         return None
 
-    return text.strip()
+    return text.strip().strip(":")
 
 
 def normalize_for_match(text: str) -> str:
@@ -533,13 +530,15 @@ def detect_language(text: str, model_path: str = r"D:\TMS\Models\lid.176.bin") -
     # --- Short multi-word (< 20 chars): Lingua → xlm-roberta ---
     if len(text_clean) < 20:
         lang = detector.detect_language_of(text_lower)
-        #print("whyyyyyyyy noneeeeeeeee")
+        print("whyyyyyyyy noneeeeeeeee", text_lower, lang)
         if lang is not None:
             conf = detector.compute_language_confidence(text_lower, lang)
-            if conf >= 0.60:
+            if conf >= 0.50:
+                print(text_clean)
+                print("hereeeeeee", lang)
                 return {"language": lang.iso_code_639_1.name.lower(), "confidence": round(conf, 4)}
         # return detect_with_xlmroberta(text_clean)
-        print("hereeeeeee")
+
         return None
 
     # --- Longer text: fastText → xlm-roberta → Lingua ---
@@ -618,8 +617,8 @@ def extract_foreign_content(
             return False
         min_conf = 0.85 if len(text.strip()) < 20 else 0.78
         result =  lang_result["confidence"] >= min_conf
-        # if result:
-        #     print(f"  FLAGGED: '{text[:60]}' lang={lang_result['language']} conf={lang_result['confidence']:.2f}")
+        if result:
+            print(f"  FLAGGED: '{text[:60]}' lang={lang_result['language']} conf={lang_result['confidence']:.2f}")
         return result
 
     # PDF span-wise
@@ -627,6 +626,7 @@ def extract_foreign_content(
         text = item.get("text", "").strip()
         detect_text = prepare_for_detection(text)
         print("prepare result:", detect_text)
+
         if not detect_text:
             continue
 
@@ -950,6 +950,8 @@ def keep_primary_language_only(
 
     return filtered, primary_lang, counts
 
+english_dict = enchant.Dict("en_US")
+translator = Translator()
 def segment_foreign_record(record: dict) -> List[dict]:
     text = record.get("detect_word") or record.get("word", "")
     # print("detect   TEXTTTTTTT --========",text)
@@ -963,11 +965,26 @@ def segment_foreign_record(record: dict) -> List[dict]:
         return []
     segments = []
     for token in highlight_text.split():
-        clean = token.strip(".,;:!?\"'()[]{}")
+        clean = token.strip(".,;:!?\"'()[]{}/")
         if not clean or clean.lower() in IGNORE_TERMS or clean.lower() in COMMON_MEDICAL_TERMS:
             continue
         if _NUMBER_TOKEN_RE.match(clean):  # skip numbers and codes
             continue
+
+
+        if len(clean) > 8:
+            # This is an English word - skip it
+            detection = translator.detect(clean)
+            if detection.lang == "en":
+                print("this might be english", clean)
+                continue
+        # sub_tokens = re.split(r"/", clean)
+        # for sub in sub_tokens:
+        #     sub = sub.strip(".,;:!?\"'()[]{}")  # re-strip after split
+        #     if not sub or sub.lower() in IGNORE_TERMS or sub.lower() in COMMON_MEDICAL_TERMS:
+        #         continue
+        #     if _NUMBER_TOKEN_RE.match(sub):
+        #         continue
         segments.append({
             "word":                clean,
             "original_token":      token,
@@ -1069,6 +1086,15 @@ def enrich_segments_with_word_bboxes(segments: List[dict], file_path: str) -> Li
 
         if best is not None:
             seg = {**seg, "x0": best[0], "y0": best[1], "x1": best[2], "y1": best[3]}
+
+        if best is None:
+            print(
+                "MISS:",
+                match_token,
+                "| PAGE:", page_no,
+                "| ROW:", seg.get("row_no"),
+                "| CELL BBOX:", (cell_x0, cell_y0, cell_x1, cell_y1)
+            )
 
         enriched.append(seg)
 
