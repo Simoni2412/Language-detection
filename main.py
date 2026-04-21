@@ -26,12 +26,13 @@ ZH_PREFIXES = ("zh", "ja", "ko")
 IGNORE_TERMS = {"unk", "n/a", "na", "ni", "yes", "no", "fr", "comment", "comments", "sender",
                 "test", "result", "value", "qualifier", "date", "name", "type", "code",
                 "status", "number", "source", "report", "case", "drug", "dose", "route", "senders",
-                "given", "value/qualifier", "duplicate", "textual", "medra", "unit", "paclitaxel arrow",
+                "given", "value/qualifier", "duplicate", "textual", "medra", "unit", "paclitaxel",
                 "exfumador", "transminases", "afssaps", "fr-afssaps-", "france",
                 }
 COMMON_MEDICAL_TERMS = {
     "lipase", "glucose", "albumin", "protein", "plasma",
     "insulin", "cholesterol", "bilirubin", "carcinoma", "paxlovid", "pembrolizumab", "patient",
+    "paclitaxel", "concomitant", "qualification"
 }
 # Common English words that look French/Italian to fastText
 # (pharma regulatory domain cognates + British spellings)
@@ -278,12 +279,11 @@ _ORG_NAME_RE = re.compile(r'^[A-Z]{2,6}\s*[-–]\s*.+$')
 
 # Matches dosage-only strings like "200 Mg milligram(s)", "5 AUC", "70 Years"
 _DOSAGE_RE = re.compile(
-    r'^[\d\s\.,]+\s*'
-    r'(mg|mcg|ug|ml|l|auc|kg|g|mmol|nmol'
+    r'^(mg|mcg|ug|ml|auc|kg|g|mmol|nmol'
     r'|milligram|microgram|liter|litre'
     r'|tablet|capsule|vial|ampoule'
     r'|dose|unit|units|interval|days|weeks|months|years)'
-    r'[\s\(\)a-z\d\.,/]*$',
+    r'[\s\(\)s]*$',  # allow trailing (s), spaces
     re.IGNORECASE
 )
 
@@ -296,18 +296,18 @@ _ALL_CAPS_HEADER_RE = re.compile(r'^[A-Z][A-Z\s\/\-]+$')
 # # Field labels ending with ? or : like "Was Autopsy Done?", "Test Result (unit):"
 # _FIELD_LABEL_RE = re.compile(r'^.+[\?\:]$')
 
-#
-# # Strips a leading drug name + dosage: "KEYTRUDA 25 mg/mL, " → ""
-# _DRUG_PREFIX_RE = re.compile(
-#     r'(mg|mcg|ml|g|ug|mmol|mg/ml|mcg/ml)'
-#     r'[^,]*,?\s*',
-#     re.IGNORECASE
-# )
+
+MEDDRA_CLEAN_RE = re.compile(
+    r"\(?['\"]?\b(?:MedDRA|code|version)\b['\"]?\)?[:']?",
+    re.IGNORECASE
+)
+
 _NUMBER_TOKEN_RE = re.compile(
     r'^[\d\.\,%\+\-]+$'         # pure numbers, percentages, decimals: 3, 12%, 40%
     r'|^[\W_]+$'                # only punctuation (..., /, •)
     r'|^/?r[\W_]*$'
-    r'|^\d+[a-zA-Z]{1,3}$',     # number+unit suffix: 25mg, 200ml
+    r'|^\d+[a-zA-Z]{1,3}$'    # number+unit suffix: 25mg, 200ml
+    r'|^\d{1,2}:\d{2}(:\d{2})?\s?(AM|PM)?$',
     re.IGNORECASE
 )
 
@@ -340,27 +340,28 @@ def prepare_for_detection(text: str) -> Optional[str]:
     # text = normalize_for_detection(text)
 
     if not text or text.lower().strip() in IGNORE_TERMS:
-        #print(f"  KILLED by IGNORE_TERMS: '{text}'")
+        print(f"  KILLED by IGNORE_TERMS: '{text}'")
         return None
     stripped = text.strip()
     if _CASE_ID_RE.match(stripped):
         #print(f"  KILLED by CASE_ID_RE: '{text}'")
         return None
-    if _ACRONYM_RE.match(stripped):
+    # if _ACRONYM_RE.match(stripped):
         # print(f"  KILLED by ACRONYM_RE: '{text}'")
-        return None
+    #     return None
     if _ORG_NAME_RE.match(stripped):
         # print(f"  KILLED by ORG_NAME_RE: '{text}'")
         return None
     if _STRUCTURED_ID_RE.match(stripped):
         print(f"  KILLED by STRUCTURED_ID_RE: '{text}'")
         return None
-    if _ALL_CAPS_HEADER_RE.match(stripped) and '(' not in stripped:
+    # if _ALL_CAPS_HEADER_RE.match(stripped) and '(' not in stripped:
         # print(f"  KILLED by ALL_CAPS_HEADER_RE: '{text}'")
-        return None
+    #     return None
     if _DOSAGE_RE.match(text.strip()):
-        # print(f"  KILLED by DOSAGE_RE: '{text}'")
+        print(f"  KILLED by DOSAGE_RE: '{text}'")
         return None
+
     # 🔥 ADD HERE
     text = _remove_numbers(text)
     if len(text.strip()) < 2:
@@ -368,16 +369,6 @@ def prepare_for_detection(text: str) -> Optional[str]:
         return None
 
     return text.strip().strip(":")
-
-
-def normalize_for_match(text: str) -> str:
-    """Normalize for glossary key comparison — always lowercase."""
-    return normalize(text, lowercase=True)
-
-
-def normalize_word_for_match(word: str) -> str:
-    """Normalize a single token for Aho-Corasick matching."""
-    return normalize_for_match(word)
 
 # Build once at startup — restrict to languages you actually expect
 # This makes it faster and more accurate than detecting all 75 languages
@@ -468,29 +459,6 @@ def detect_language_by_tokens(text: str, model_path: str):
         "confidence": normalized_conf
     }
 
-# _xlm_pipeline = None
-#
-# def get_xlm_pipeline():
-#     global _xlm_pipeline
-#     if _xlm_pipeline is None:
-#         _xlm_pipeline = hf_pipeline(
-#             "text-classification",
-#             model="papluca/xlm-roberta-base-language-detection",
-#             device=-1  # CPU; change to 0 if you have GPU
-#         )
-#     return _xlm_pipeline
-#
-#
-# def detect_with_xlmroberta(text: str) -> Optional[dict]:
-#     try:
-#         result = get_xlm_pipeline()(text[:512], truncation=True)[0]
-#         return {
-#             "language":   result["label"],
-#             "confidence": round(result["score"], 4)
-#         }
-#     except Exception:
-#         return None
-
 def detect_language(text: str, model_path: str = r"D:\TMS\Models\lid.176.bin") -> Optional[dict]:
     if not text or not text.strip():
         print("no textt")
@@ -556,14 +524,7 @@ def detect_language(text: str, model_path: str = r"D:\TMS\Models\lid.176.bin") -
         conf = detector.compute_language_confidence(text_lower, lang)
         return {"language": lang.iso_code_639_1.name.lower(), "confidence": round(conf, 4)}
 
-    # Both fastText and Lingua uncertain — use xlm-roberta as last resort
-    # Only for multi-word text (single words handled separately above)
-    # if len(words) >= 2:
-    #     xlm_result = detect_with_xlmroberta(text_clean)
-    #     if xlm_result and xlm_result["confidence"] >= 0.99:
-    #         return xlm_result
-
-    if 0.20 <= ft_conf <= 0.70:
+    if 0.20 <= ft_conf <= 0.74:
         # --- FINAL fallback: token-level detection ---
         print("lowwwww conffffff", text_clean)
         token_result = detect_language_by_tokens(text_clean, model_path)
@@ -575,9 +536,6 @@ def detect_language(text: str, model_path: str = r"D:\TMS\Models\lid.176.bin") -
 
     return None
 
-def is_probably_english_word(token: str) -> bool:
-    """Rough heuristic — pure ASCII letters are likely English."""
-    return bool(re.match(r"^[A-Za-z]+$", token))
 
 # ---------------------------------------------------------------------------
 # Foreign content extraction
@@ -608,15 +566,11 @@ def extract_foreign_content(
     def is_foreign(lang_result: dict, text: str) -> bool:
         if lang_result["language"] == base_language:
             return False
-        # # Reject obvious English tokens
-        # if is_probably_english_word(text):
-        #     print("probably english word", text)
-        #     return False
-            # If every token is a known English word, don't flag regardless of model confidence
         if _all_words_english(text):
+            print("english word", text)
             return False
-        min_conf = 0.85 if len(text.strip()) < 20 else 0.78
-        result =  lang_result["confidence"] >= min_conf
+        # min_conf = 0.85 if len(text.strip()) < 20 else 0.78
+        result =  lang_result["confidence"] >= 0.50
         if result:
             print(f"  FLAGGED: '{text[:60]}' lang={lang_result['language']} conf={lang_result['confidence']:.2f}")
         return result
@@ -635,42 +589,43 @@ def extract_foreign_content(
 
         #print("is_foreign:", is_foreign(lang_result, detect_text) if lang_result else "N/A")
         # Always run fallback as cross-check, not just on failure
-        if not lang_result:
+        if not lang_result or (lang_result['language'] == base_language and lang_result['confidence'] > 0.9):
             continue
         # STEP 1 — trust strong primary result
         if is_foreign(lang_result, detect_text):
+            print("passsedddd", detect_text)
             pass  # keep it
-
         else:
-            fallback_text = _extract_detectable_segment(detect_text)
-            if fallback_text != detect_text:
-                fallback_result = detect_language(fallback_text, model_path)
-                if fallback_result and is_foreign(fallback_result, fallback_text):
-                    lang_result = fallback_result
-                    detect_text = fallback_text
-                else:
-                    token_result = detect_language_by_tokens(detect_text, model_path)
-                    if token_result and is_foreign(token_result, detect_text):
-                        # token-level agrees there's something foreign
-                        lang_result = token_result
-                    else:
-                        # both fallbacks say not foreign — trust them over primary
-                        continue
-            else:
-                token_result = detect_language_by_tokens(detect_text, model_path)
-                if token_result and is_foreign(token_result, detect_text):
-                    lang_result = token_result
-                else:
-                    # token-level says not foreign — discard primary result
-                    continue
+            continue
+
+        # else:
+        #     fallback_text = _extract_detectable_segment(detect_text)
+        #     if fallback_text != detect_text:
+        #         fallback_result = detect_language(fallback_text, model_path)
+        #         print("fallback result:", fallback_result)
+        #         if fallback_result and is_foreign(fallback_result, fallback_text):
+        #             lang_result = fallback_result
+        #             detect_text = fallback_text
+        #             print("passsedddd", detect_text)
+        #         else:
+        #             token_result = detect_language_by_tokens(detect_text, model_path)
+        #             if token_result and is_foreign(token_result, detect_text):
+        #                 # token-level agrees there's something foreign
+        #                 lang_result = token_result
+        #                 print("passsedddd", detect_text)
+        #             else:
+        #                 # both fallbacks say not foreign — trust them over primary
+        #                 continue
+        #     else:
+        #         token_result = detect_language_by_tokens(detect_text, model_path)
+        #         if token_result and is_foreign(token_result, detect_text):
+        #             lang_result = token_result
+        #             print("passsedddd", detect_text)
+        #         else:
+        #             # token-level says not foreign — discard primary result
+        #             continue
 
 
-        # # ADD THIS BLOCK
-        # token_result = detect_language_by_tokens(detect_text, model_path)
-        #
-        # if token_result:
-        #     if token_result["language"] != lang_result["language"]:
-        #         continue  # disagreement → skip
 
         bbox = item.get("bbox", [None, None, None, None])
         foreign_records.append({
@@ -704,33 +659,33 @@ def extract_foreign_content(
         # STEP 1 — trust strong primary result
         if is_foreign(lang_result, detect_text):
             pass  # keep it
-        # Always run fallback as cross-check, not just on failure
         else:
-            fallback_text = _extract_detectable_segment(detect_text)
-
-            if fallback_text != detect_text:
-                fallback_result = detect_language(fallback_text, model_path)
-                if fallback_result and is_foreign(fallback_result, fallback_text):
-                    lang_result = fallback_result
-                    detect_text = fallback_text
-                else:
-                    token_result = detect_language_by_tokens(detect_text, model_path)
-                    if token_result and is_foreign(token_result, detect_text):
-                        # token-level agrees there's something foreign
-                        lang_result = token_result
-                    else:
-                        # both fallbacks say not foreign — trust them over primary
-                        continue
-            else:
-                token_result = detect_language_by_tokens(detect_text, model_path)
-                if token_result and is_foreign(token_result, detect_text):
-                    lang_result = token_result
-                else:
-                    # token-level says not foreign — discard primary result
-                    continue
-
-        if not lang_result or not is_foreign(lang_result, detect_text):
             continue
+        # Always run fallback as cross-check, not just on failure
+        # else:
+        #     fallback_text = _extract_detectable_segment(detect_text)
+        #
+        #     if fallback_text != detect_text:
+        #         fallback_result = detect_language(fallback_text, model_path)
+        #         if fallback_result and is_foreign(fallback_result, fallback_text):
+        #             lang_result = fallback_result
+        #             detect_text = fallback_text
+        #         else:
+        #             token_result = detect_language_by_tokens(detect_text, model_path)
+        #             if token_result and is_foreign(token_result, detect_text):
+        #                 # token-level agrees there's something foreign
+        #                 lang_result = token_result
+        #             else:
+        #                 # both fallbacks say not foreign — trust them over primary
+        #                 continue
+        #     else:
+        #         token_result = detect_language_by_tokens(detect_text, model_path)
+        #         if token_result and is_foreign(token_result, detect_text):
+        #             lang_result = token_result
+        #         else:
+        #             # token-level says not foreign — discard primary result
+        #             continue
+
 
         # ADD THIS BLOCK
         # token_result = detect_language_by_tokens(detect_text, model_path)
@@ -755,52 +710,50 @@ def extract_foreign_content(
     # PDF + DOCX table cell-wise
     for item in parsed_data.get("table_data", []):
         text = item.get("cell_text", "").strip()
+        print("before prepareeee", text)
         detect_text = prepare_for_detection(text)
+        print("debuugsssss", detect_text)
         if not detect_text:
             continue
 
         lang_result = detect_language(detect_text, model_path)
-        if not lang_result:
+        print("lang result", lang_result)
+        if not lang_result or (lang_result['language'] == base_language and lang_result['confidence'] > 0.9):
             continue
         #print("lang result",lang_result)
         # Always run fallback as cross-check, not just on failure
-        if not lang_result:
-            continue
         # STEP 1 — trust strong primary result
         if is_foreign(lang_result, detect_text):
+            print("passsedddd", detect_text)
             pass  # keep it
         else:
-            fallback_text = _extract_detectable_segment(detect_text)
-
-            if fallback_text != detect_text:
-                fallback_result = detect_language(fallback_text, model_path)
-                if fallback_result and is_foreign(fallback_result, fallback_text):
-                    lang_result = fallback_result
-                    detect_text = fallback_text
-                else:
-                    token_result = detect_language_by_tokens(detect_text, model_path)
-                    if token_result and is_foreign(token_result, detect_text):
-                        # token-level agrees there's something foreign
-                        lang_result = token_result
-                    else:
-                        # both fallbacks say not foreign — trust them over primary
-                        continue
-            else:
-                token_result = detect_language_by_tokens(detect_text, model_path)
-                if token_result and is_foreign(token_result, detect_text):
-                    lang_result = token_result
-                else:
-                    # token-level says not foreign — discard primary result
-                    continue
-
-        if not lang_result or not is_foreign(lang_result, detect_text):
             continue
-        # ADD THIS BLOCK
-        # token_result = detect_language_by_tokens(detect_text, model_path)
+
+        # else:
+        #     fallback_text = _extract_detectable_segment(detect_text)
         #
-        # if token_result:
-        #     if token_result["language"] != lang_result["language"]:
-        #         continue  # disagreement → skip
+        #     if fallback_text != detect_text:
+        #         fallback_result = detect_language(fallback_text, model_path)
+        #         print("fallbackkkkkkk result",fallback_result)
+        #         if fallback_result and is_foreign(fallback_result, fallback_text):
+        #             lang_result = fallback_result
+        #             detect_text = fallback_text
+        #         else:
+        #             token_result = detect_language_by_tokens(detect_text, model_path)
+        #             if token_result and is_foreign(token_result, detect_text):
+        #                 # token-level agrees there's something foreign
+        #                 lang_result = token_result
+        #             else:
+        #                 # both fallbacks say not foreign — trust them over primary
+        #                 continue
+        #     else:
+        #         token_result = detect_language_by_tokens(detect_text, model_path)
+        #         if token_result and is_foreign(token_result, detect_text):
+        #             lang_result = token_result
+        #         else:
+        #             # token-level says not foreign — discard primary result
+        #             continue
+
 
         foreign_records.append({
             "source_type":          "table",
@@ -834,39 +787,31 @@ def extract_foreign_content(
         # STEP 1 — trust strong primary result
         if is_foreign(lang_result, detect_text):
             pass  # keep it
-        else:
-            fallback_text = _extract_detectable_segment(detect_text)
-
-            if fallback_text != detect_text:
-                fallback_result = detect_language(fallback_text, model_path)
-                if fallback_result and is_foreign(fallback_result, fallback_text):
-                    lang_result = fallback_result
-                    detect_text = fallback_text
-                else:
-                    token_result = detect_language_by_tokens(detect_text, model_path)
-                    if token_result and is_foreign(token_result, detect_text):
-                        # token-level agrees there's something foreign
-                        lang_result = token_result
-                    else:
-                        # both fallbacks say not foreign — trust them over primary
-                        continue
-            else:
-                token_result = detect_language_by_tokens(detect_text, model_path)
-                if token_result and is_foreign(token_result, detect_text):
-                    lang_result = token_result
-                else:
-                    # token-level says not foreign — discard primary result
-                    continue
-
-        if not lang_result or not is_foreign(lang_result, detect_text):
-            continue
+        # else:
+        #     fallback_text = _extract_detectable_segment(detect_text)
         #
-        # # ADD THIS BLOCK
-        # token_result = detect_language_by_tokens(detect_text, model_path)
-        #
-        # if token_result:
-        #     if token_result["language"] != lang_result["language"]:
-        #         continue  # disagreement → skip
+        #     if fallback_text != detect_text:
+        #         fallback_result = detect_language(fallback_text, model_path)
+        #         if fallback_result and is_foreign(fallback_result, fallback_text):
+        #             lang_result = fallback_result
+        #             detect_text = fallback_text
+        #         else:
+        #             token_result = detect_language_by_tokens(detect_text, model_path)
+        #             if token_result and is_foreign(token_result, detect_text):
+        #                 # token-level agrees there's something foreign
+        #                 lang_result = token_result
+        #             else:
+        #                 # both fallbacks say not foreign — trust them over primary
+        #                 continue
+        #     else:
+        #         token_result = detect_language_by_tokens(detect_text, model_path)
+        #         if token_result and is_foreign(token_result, detect_text):
+        #             lang_result = token_result
+        #         else:
+        #             # token-level says not foreign — discard primary result
+        #             continue
+
+
 
         foreign_records.append({
             "source_type":          "txt_line",
@@ -882,21 +827,6 @@ def extract_foreign_content(
         })
 
     return foreign_records
-
-# ---------------------------------------------------------------------------
-# BBox union helper  (FIX 6: was missing)
-# ---------------------------------------------------------------------------
-
-def union_bbox(bboxes) -> BboxPdf:
-    bboxes = list(bboxes)
-    if not bboxes:
-        return BboxPdf(0, 0, 0, 0)
-    x0 = min(b.x0 for b in bboxes)
-    y0 = min(b.y0 for b in bboxes)
-    x1 = max(b.x1 for b in bboxes)
-    y1 = max(b.y1 for b in bboxes)
-    return BboxPdf(x0, y0, x1, y1)
-
 
 def detect_document_language(parsed_data: dict, model_path: str = r"D:\TMS\Models\lid.176.bin") -> str:
     all_text = []
@@ -951,14 +881,16 @@ def keep_primary_language_only(
     return filtered, primary_lang, counts
 
 english_dict = enchant.Dict("en_US")
-translator = Translator()
+# translator = Translator()
 def segment_foreign_record(record: dict) -> List[dict]:
+    # print("recordddddddddddddddd", record)
     text = record.get("detect_word") or record.get("word", "")
     # print("detect   TEXTTTTTTT --========",text)
     original_text = record.get("word") or record.get("detected_word", "")
     # print("original   TEXTTTTTTT --========",original_text)
-    highlight_text = normalize_for_detection(original_text)
-    highlight_text = re.sub(r"\b\d+\s*mg/mL\b", " ", highlight_text, flags=re.I)
+    # highlight_text = normalize_for_detection(original_text)
+    # print("highlight_text:", original_text)
+    highlight_text = re.sub(r"\b\d+\s*mg/mL\b", " ", original_text, flags=re.I)
     highlight_text = re.sub(r"\s+", " ", highlight_text).strip()
 
     if not text:
@@ -966,25 +898,26 @@ def segment_foreign_record(record: dict) -> List[dict]:
     segments = []
     for token in highlight_text.split():
         clean = token.strip(".,;:!?\"'()[]{}/")
+        print("tokennn", clean)
         if not clean or clean.lower() in IGNORE_TERMS or clean.lower() in COMMON_MEDICAL_TERMS:
             continue
-        if _NUMBER_TOKEN_RE.match(clean):  # skip numbers and codes
+        if _NUMBER_TOKEN_RE.match(clean)  or clean.startswith("ICH") or MEDDRA_CLEAN_RE.match(clean):  # skip numbers and codes
+            continue
+        if _DOSAGE_RE.match(clean) or clean.startswith("ICS"):
             continue
 
-
-        if len(clean) > 8:
+        if len(clean) > 4:
             # This is an English word - skip it
-            detection = translator.detect(clean)
-            if detection.lang == "en":
-                print("this might be english", clean)
-                continue
-        # sub_tokens = re.split(r"/", clean)
-        # for sub in sub_tokens:
-        #     sub = sub.strip(".,;:!?\"'()[]{}")  # re-strip after split
-        #     if not sub or sub.lower() in IGNORE_TERMS or sub.lower() in COMMON_MEDICAL_TERMS:
-        #         continue
-        #     if _NUMBER_TOKEN_RE.match(sub):
-        #         continue
+            # detection = translator.detect(clean)
+            lingua_detector = get_lingua_detector()
+            lang = lingua_detector.detect_language_of(clean)
+            if lang is not None:
+                conf = lingua_detector.compute_language_confidence(clean, lang)
+                print(clean, {"language": lang.iso_code_639_1.name.lower(), "confidence": round(conf, 4)})
+                if  lang.iso_code_639_1.name.lower() == "en" or (lang.iso_code_639_1.name.lower() !="en" and conf<0.60):
+                    print("this might be english, linguaaaaaaaaaqa", clean)
+                    continue
+
         segments.append({
             "word":                clean,
             "original_token":      token,
